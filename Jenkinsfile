@@ -160,7 +160,7 @@ pipeline {
 
             archiveArtifacts(
                 artifacts: 'npm-audit.json,test-output.txt,docker-image-inspect.json',
-                allowEmpty: true,
+                allowEmptyArchive: true,
                 fingerprint: true
             )
 
