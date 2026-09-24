@@ -15,6 +15,9 @@ pipeline {
                 artifactNumToKeepStr: '10'
             )
         )
+
+        // We perform checkout explicitly in the Checkout stage.
+        skipDefaultCheckout(true)
     }
 
     stages {
@@ -26,79 +29,83 @@ pipeline {
             }
         }
 
+
         stage('Install Dependencies') {
             steps {
-                script {
-                    docker.image('node:16-bullseye')
-                        .inside('--user 1000:1000') {
+                echo 'Installing dependencies using Node.js 16 container...'
 
-                        echo 'Checking Node.js version...'
-                        sh 'node --version'
-                        sh 'npm --version'
-
-                        echo 'Installing dependencies...'
-                        sh 'npm ci'
-                    }
-                }
+                sh '''
+                    docker run --rm \
+                    --user 1000:1000 \
+                    -v "$WORKSPACE:/workspace" \
+                    -w /workspace \
+                    node:16-bullseye \
+                    sh -c "node --version && npm --version && npm ci"
+                '''
             }
         }
+
 
         stage('Unit Tests') {
             steps {
-                script {
-                    docker.image('node:16-bullseye')
-                        .inside('--user 1000:1000') {
+                echo 'Running unit tests using Node.js 16 container...'
 
-                        echo 'Running unit tests...'
-
-                        sh '''
-                            bash -o pipefail -c \
-                            "npm test | tee test-output.txt"
-                        '''
-                    }
-                }
+                sh '''
+                    docker run --rm \
+                    --user 1000:1000 \
+                    -v "$WORKSPACE:/workspace" \
+                    -w /workspace \
+                    node:16-bullseye \
+                    sh -c 'bash -o pipefail -c "npm test | tee test-output.txt"'
+                '''
             }
         }
+
 
         stage('Dependency Security Scan') {
             steps {
                 script {
-                    docker.image('node:16-bullseye')
-                        .inside('--user 1000:1000') {
 
-                        echo 'Scanning production dependencies...'
+                    echo 'Scanning production dependencies using Node.js 16 container...'
 
-                        def auditStatus = sh(
-                            script: '''
-                                npm audit \
-                                --omit=dev \
-                                --audit-level=high \
-                                --json > npm-audit.json
-                            ''',
-                            returnStatus: true
+                    def auditStatus = sh(
+                        script: '''
+                            docker run --rm \
+                            --user 1000:1000 \
+                            -v "$WORKSPACE:/workspace" \
+                            -w /workspace \
+                            node:16-bullseye \
+                            sh -c 'npm audit --omit=dev --audit-level=high --json > npm-audit.json'
+                        ''',
+                        returnStatus: true
+                    )
+
+                    echo 'Displaying readable npm audit results...'
+
+                    sh '''
+                        docker run --rm \
+                        --user 1000:1000 \
+                        -v "$WORKSPACE:/workspace" \
+                        -w /workspace \
+                        node:16-bullseye \
+                        sh -c 'npm audit --omit=dev || true'
+                    '''
+
+                    if (auditStatus != 0) {
+                        error(
+                            'SECURITY GATE FAILED: High or Critical dependency vulnerabilities detected.'
                         )
-
-                        echo 'Readable npm audit output:'
-
-                        sh '''
-                            npm audit --omit=dev || true
-                        '''
-
-                        if (auditStatus != 0) {
-                            error(
-                                'SECURITY GATE FAILED: High or Critical dependency vulnerabilities detected.'
-                            )
-                        }
-
-                        echo 'Security gate passed: no High/Critical vulnerabilities detected.'
                     }
+
+                    echo 'Security gate passed: no High/Critical vulnerabilities detected.'
                 }
             }
         }
 
+
         stage('Build Docker Image') {
             steps {
-                echo 'Building Docker image...'
+                echo 'Building application Docker image...'
 
                 sh '''
                     docker build \
@@ -107,6 +114,8 @@ pipeline {
                     .
                 '''
 
+                echo 'Saving Docker image metadata as a build artifact...'
+
                 sh '''
                     docker image inspect \
                     "$IMAGE_NAME:$BUILD_NUMBER" \
@@ -114,6 +123,7 @@ pipeline {
                 '''
             }
         }
+
 
         stage('Push Docker Image') {
             steps {
@@ -126,7 +136,7 @@ pipeline {
                     )
                 ]) {
 
-                    echo 'Authenticating with Docker Hub...'
+                    echo 'Authenticating securely with Docker Hub...'
 
                     sh '''
                         echo "$DOCKER_PASS" | \
@@ -135,16 +145,22 @@ pipeline {
                         --password-stdin
                     '''
 
-                    echo 'Pushing Docker images...'
+                    echo 'Pushing versioned Docker image...'
 
                     sh '''
                         docker push "$IMAGE_NAME:$BUILD_NUMBER"
+                    '''
+
+                    echo 'Pushing latest Docker image...'
+
+                    sh '''
                         docker push "$IMAGE_NAME:latest"
                     '''
                 }
             }
         }
     }
+
 
     post {
 
@@ -153,16 +169,24 @@ pipeline {
         }
 
         failure {
-            echo 'CI/CD pipeline failed. Review the logs above.'
+            echo 'CI/CD pipeline failed. Review the stage logs above.'
+        }
+
+        aborted {
+            echo 'CI/CD pipeline was manually aborted.'
         }
 
         always {
+
+            echo 'Archiving pipeline evidence...'
 
             archiveArtifacts(
                 artifacts: 'npm-audit.json,test-output.txt,docker-image-inspect.json',
                 allowEmptyArchive: true,
                 fingerprint: true
             )
+
+            echo 'Logging out from Docker Hub...'
 
             sh 'docker logout || true'
         }
